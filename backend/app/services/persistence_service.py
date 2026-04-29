@@ -123,6 +123,79 @@ class PersistenceService:
                     updated_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS factories (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    country TEXT NOT NULL,
+                    contact_person TEXT,
+                    contact_email TEXT,
+                    tags_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS fulfillment_tasks (
+                    id TEXT PRIMARY KEY,
+                    order_id TEXT NOT NULL UNIQUE,
+                    customer_id TEXT NOT NULL,
+                    factory_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    planned_start TEXT NOT NULL,
+                    planned_end TEXT NOT NULL,
+                    actual_end TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS fulfillment_milestones (
+                    id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    milestone_name TEXT NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    planned_date TEXT NOT NULL,
+                    actual_date TEXT,
+                    responsible_party TEXT,
+                    note TEXT,
+                    proof_url TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(task_id, sequence)
+                );
+
+                CREATE TABLE IF NOT EXISTS sample_requests (
+                    id TEXT PRIMARY KEY,
+                    customer_id TEXT NOT NULL,
+                    factory_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    feedback TEXT,
+                    decision TEXT NOT NULL,
+                    note TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS sample_request_items (
+                    id TEXT PRIMARY KEY,
+                    sample_request_id TEXT NOT NULL,
+                    category_name TEXT NOT NULL,
+                    quantity INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    tracking_no TEXT,
+                    note TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS sample_order_links (
+                    id TEXT PRIMARY KEY,
+                    sample_request_id TEXT NOT NULL,
+                    sample_item_id TEXT NOT NULL,
+                    order_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(sample_request_id, sample_item_id)
+                );
+
                 CREATE TABLE IF NOT EXISTS email_reply_drafts (
                     id TEXT PRIMARY KEY,
                     customer_id TEXT NOT NULL,
@@ -187,6 +260,50 @@ class PersistenceService:
                 conn.executemany(
                     "INSERT INTO timeline_events (id,customer_id,timestamp,source,title,summary,created_at) VALUES (?,?,?,?,?,?,?)",
                     items,
+                )
+
+            fcnt = conn.execute("SELECT COUNT(1) FROM factories").fetchone()[0]
+            if fcnt == 0:
+                now = utc_now_iso()
+                factories = [
+                    (
+                        "f001",
+                        "Jiangsu Precision Works",
+                        "China",
+                        "Li Wei",
+                        "ops@jiangsu-precision.example",
+                        json.dumps(["sensor", "electronics"]),
+                        now,
+                        now,
+                    ),
+                    (
+                        "f002",
+                        "Shenzhen Export Assembly",
+                        "China",
+                        "Annie Chen",
+                        "delivery@sz-assembly.example",
+                        json.dumps(["assembly", "inspection"]),
+                        now,
+                        now,
+                    ),
+                    (
+                        "f003",
+                        "Ningbo Fulfillment Plant",
+                        "China",
+                        "Tom Hu",
+                        "schedule@ningbo-plant.example",
+                        json.dumps(["shipping", "loading"]),
+                        now,
+                        now,
+                    ),
+                ]
+                conn.executemany(
+                    """
+                    INSERT INTO factories
+                    (id,name,country,contact_person,contact_email,tags_json,created_at,updated_at)
+                    VALUES (?,?,?,?,?,?,?,?)
+                    """,
+                    factories,
                 )
 
     def list_customers(self) -> list[dict[str, Any]]:
@@ -826,6 +943,34 @@ class PersistenceService:
                     ),
                 )
 
+            risk_row = conn.execute(
+                "SELECT id FROM scheduled_jobs WHERE job_type=?",
+                ("scan_delay_risks",),
+            ).fetchone()
+            if risk_row is None:
+                next_run = (datetime.now(timezone.utc) + timedelta(seconds=45)).isoformat()
+                conn.execute(
+                    """
+                    INSERT INTO scheduled_jobs (
+                        id,job_type,enabled,interval_seconds,max_retries,retry_count,
+                        next_run_at,last_run_at,last_status,last_error,payload_json
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        "job_delay_risks",
+                        "scan_delay_risks",
+                        1,
+                        900,
+                        3,
+                        0,
+                        next_run,
+                        None,
+                        "scheduled",
+                        None,
+                        json.dumps({"auto_mark": True}),
+                    ),
+                )
+
     def get_latest_email_record(self, customer_id: str) -> dict[str, Any] | None:
         with self._connect() as conn:
             row = conn.execute(
@@ -874,6 +1019,642 @@ class PersistenceService:
             "intent": row["intent"],
             "customer_id": row["customer_id"],
             "raw": json.loads(row["raw_json"] or "{}"),
+        }
+
+    def list_factories(self) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id,name,country,contact_person,contact_email,tags_json
+                FROM factories
+                ORDER BY name ASC
+                """
+            ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "name": row["name"],
+                "country": row["country"],
+                "contact_person": row["contact_person"],
+                "contact_email": row["contact_email"],
+                "tags": json.loads(row["tags_json"] or "[]"),
+            }
+            for row in rows
+        ]
+
+    def upsert_fulfillment_task(
+        self,
+        order_id: str,
+        customer_id: str,
+        factory_id: str,
+        status: str,
+        planned_start: str,
+        planned_end: str,
+    ) -> str:
+        now = utc_now_iso()
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT id FROM fulfillment_tasks WHERE order_id=?",
+                (order_id,),
+            ).fetchone()
+            if row is None:
+                task_id = f"ft_{uuid.uuid4().hex[:10]}"
+                conn.execute(
+                    """
+                    INSERT INTO fulfillment_tasks (
+                        id, order_id, customer_id, factory_id, status,
+                        planned_start, planned_end, actual_end, created_at, updated_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        task_id,
+                        order_id,
+                        customer_id,
+                        factory_id,
+                        status,
+                        planned_start,
+                        planned_end,
+                        None,
+                        now,
+                        now,
+                    ),
+                )
+                return task_id
+
+            task_id = str(row["id"])
+            conn.execute(
+                """
+                UPDATE fulfillment_tasks
+                SET customer_id=?, factory_id=?, status=?, planned_start=?, planned_end=?, updated_at=?
+                WHERE id=?
+                """,
+                (customer_id, factory_id, status, planned_start, planned_end, now, task_id),
+            )
+        return task_id
+
+    def assign_factory_to_fulfillment_task(self, task_id: str, factory_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT id FROM fulfillment_tasks WHERE id=?", (task_id,)).fetchone()
+            if row is None:
+                return None
+            conn.execute(
+                "UPDATE fulfillment_tasks SET factory_id=?, updated_at=? WHERE id=?",
+                (factory_id, utc_now_iso(), task_id),
+            )
+
+        with self._connect() as conn:
+            task = conn.execute(
+                """
+                SELECT
+                    ft.id,
+                    ft.order_id,
+                    ft.customer_id,
+                    c.name AS customer_name,
+                    o.product_name,
+                    o.quantity,
+                    o.status AS order_status,
+                    ft.factory_id,
+                    f.name AS factory_name,
+                    ft.status,
+                    ft.planned_start,
+                    ft.planned_end,
+                    ft.actual_end
+                FROM fulfillment_tasks ft
+                JOIN orders o ON o.id = ft.order_id
+                JOIN customers c ON c.id = ft.customer_id
+                JOIN factories f ON f.id = ft.factory_id
+                WHERE ft.id=?
+                """,
+                (task_id,),
+            ).fetchone()
+        return dict(task) if task else None
+
+    def list_fulfillment_tasks(
+        self,
+        status: str | None = None,
+        search: str | None = None,
+    ) -> list[dict[str, Any]]:
+        query = """
+            SELECT
+                ft.id,
+                ft.order_id,
+                ft.customer_id,
+                c.name AS customer_name,
+                o.product_name,
+                o.quantity,
+                o.status AS order_status,
+                ft.factory_id,
+                f.name AS factory_name,
+                ft.status,
+                ft.planned_start,
+                ft.planned_end,
+                ft.actual_end
+            FROM fulfillment_tasks ft
+            JOIN orders o ON o.id = ft.order_id
+            JOIN customers c ON c.id = ft.customer_id
+            JOIN factories f ON f.id = ft.factory_id
+        """
+        args: list[Any] = []
+        clauses: list[str] = []
+        if status:
+            clauses.append("ft.status=?")
+            args.append(status)
+        if search:
+            kw = f"%{search.strip()}%"
+            clauses.append(
+                "(ft.order_id LIKE ? OR c.name LIKE ? OR o.product_name LIKE ? OR f.name LIKE ?)"
+            )
+            args.extend([kw, kw, kw, kw])
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY ft.planned_start ASC"
+
+        with self._connect() as conn:
+            rows = conn.execute(query, tuple(args)).fetchall()
+        return [dict(row) for row in rows]
+
+    def upsert_fulfillment_milestones(self, task_id: str, milestones: list[dict[str, Any]]) -> None:
+        now = utc_now_iso()
+        with self._connect() as conn:
+            for item in milestones:
+                row = conn.execute(
+                    "SELECT id FROM fulfillment_milestones WHERE task_id=? AND sequence=?",
+                    (task_id, int(item["sequence"])),
+                ).fetchone()
+                if row is None:
+                    milestone_id = f"fm_{uuid.uuid4().hex[:10]}"
+                    conn.execute(
+                        """
+                        INSERT INTO fulfillment_milestones (
+                            id, task_id, milestone_name, sequence, status,
+                            planned_date, actual_date, responsible_party, note,
+                            proof_url, created_at, updated_at
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                        """,
+                        (
+                            milestone_id,
+                            task_id,
+                            str(item["milestone_name"]),
+                            int(item["sequence"]),
+                            str(item.get("status") or "planned"),
+                            str(item["planned_date"]),
+                            item.get("actual_date"),
+                            item.get("responsible_party"),
+                            item.get("note"),
+                            item.get("proof_url"),
+                            now,
+                            now,
+                        ),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        UPDATE fulfillment_milestones
+                        SET milestone_name=?, status=?, planned_date=?, updated_at=?
+                        WHERE task_id=? AND sequence=?
+                        """,
+                        (
+                            str(item["milestone_name"]),
+                            str(item.get("status") or "planned"),
+                            str(item["planned_date"]),
+                            now,
+                            task_id,
+                            int(item["sequence"]),
+                        ),
+                    )
+
+    def list_fulfillment_milestones(self, task_id: str) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    id,
+                    task_id,
+                    milestone_name,
+                    sequence,
+                    status,
+                    planned_date,
+                    actual_date,
+                    responsible_party,
+                    note,
+                    proof_url
+                FROM fulfillment_milestones
+                WHERE task_id=?
+                ORDER BY sequence ASC
+                """,
+                (task_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_fulfillment_milestones_with_context(self) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    fm.id AS milestone_id,
+                    fm.task_id,
+                    fm.milestone_name,
+                    fm.sequence,
+                    fm.status,
+                    fm.planned_date,
+                    fm.actual_date,
+                    ft.order_id,
+                    ft.customer_id,
+                    c.name AS customer_name,
+                    f.name AS factory_name
+                FROM fulfillment_milestones fm
+                JOIN fulfillment_tasks ft ON ft.id = fm.task_id
+                JOIN customers c ON c.id = ft.customer_id
+                JOIN factories f ON f.id = ft.factory_id
+                ORDER BY fm.planned_date ASC
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def update_fulfillment_milestone(
+        self,
+        milestone_id: str,
+        status: str | None = None,
+        planned_date: str | None = None,
+        actual_date: str | None = None,
+        responsible_party: str | None = None,
+        note: str | None = None,
+        proof_url: str | None = None,
+    ) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            current = conn.execute(
+                "SELECT * FROM fulfillment_milestones WHERE id=?",
+                (milestone_id,),
+            ).fetchone()
+            if current is None:
+                return None
+
+            next_status = status if status is not None else current["status"]
+            next_planned_date = planned_date if planned_date is not None else current["planned_date"]
+            next_actual_date = actual_date if actual_date is not None else current["actual_date"]
+            next_responsible_party = (
+                responsible_party if responsible_party is not None else current["responsible_party"]
+            )
+            next_note = note if note is not None else current["note"]
+            next_proof_url = proof_url if proof_url is not None else current["proof_url"]
+
+            conn.execute(
+                """
+                UPDATE fulfillment_milestones
+                SET status=?, planned_date=?, actual_date=?, responsible_party=?,
+                    note=?, proof_url=?, updated_at=?
+                WHERE id=?
+                """,
+                (
+                    next_status,
+                    next_planned_date,
+                    next_actual_date,
+                    next_responsible_party,
+                    next_note,
+                    next_proof_url,
+                    utc_now_iso(),
+                    milestone_id,
+                ),
+            )
+
+            updated = conn.execute(
+                """
+                SELECT
+                    id,
+                    task_id,
+                    milestone_name,
+                    sequence,
+                    status,
+                    planned_date,
+                    actual_date,
+                    responsible_party,
+                    note,
+                    proof_url
+                FROM fulfillment_milestones
+                WHERE id=?
+                """,
+                (milestone_id,),
+            ).fetchone()
+
+        return dict(updated) if updated else None
+
+    def create_sample_request(
+        self,
+        customer_id: str,
+        factory_id: str,
+        categories: list[dict[str, Any]],
+        note: str | None = None,
+    ) -> dict[str, Any]:
+        sample_id = f"sr_{uuid.uuid4().hex[:10]}"
+        now = utc_now_iso()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO sample_requests (
+                    id, customer_id, factory_id, status, feedback, decision, note, created_at, updated_at
+                ) VALUES (?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    sample_id,
+                    customer_id,
+                    factory_id,
+                    "requested",
+                    None,
+                    "pending",
+                    note,
+                    now,
+                    now,
+                ),
+            )
+
+            for item in categories:
+                item_id = f"sri_{uuid.uuid4().hex[:10]}"
+                conn.execute(
+                    """
+                    INSERT INTO sample_request_items (
+                        id, sample_request_id, category_name, quantity, status,
+                        tracking_no, note, created_at, updated_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        item_id,
+                        sample_id,
+                        str(item["category_name"]),
+                        int(item.get("quantity") or 1),
+                        "requested",
+                        None,
+                        None,
+                        now,
+                        now,
+                    ),
+                )
+
+        row = self.get_sample_request(sample_id)
+        return row or {}
+
+    def get_sample_request(self, sample_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    sr.id,
+                    sr.customer_id,
+                    c.name AS customer_name,
+                    sr.factory_id,
+                    f.name AS factory_name,
+                    sr.status,
+                    sr.feedback,
+                    sr.decision,
+                    sr.note,
+                    sr.created_at,
+                    sr.updated_at,
+                    COUNT(sri.id) AS item_count
+                FROM sample_requests sr
+                JOIN customers c ON c.id = sr.customer_id
+                JOIN factories f ON f.id = sr.factory_id
+                LEFT JOIN sample_request_items sri ON sri.sample_request_id = sr.id
+                WHERE sr.id=?
+                GROUP BY sr.id
+                """,
+                (sample_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_sample_requests(
+        self,
+        status: str | None = None,
+        search: str | None = None,
+    ) -> list[dict[str, Any]]:
+        query = """
+            SELECT
+                sr.id,
+                sr.customer_id,
+                c.name AS customer_name,
+                sr.factory_id,
+                f.name AS factory_name,
+                sr.status,
+                sr.feedback,
+                sr.decision,
+                sr.note,
+                sr.created_at,
+                sr.updated_at,
+                COUNT(sri.id) AS item_count
+            FROM sample_requests sr
+            JOIN customers c ON c.id = sr.customer_id
+            JOIN factories f ON f.id = sr.factory_id
+            LEFT JOIN sample_request_items sri ON sri.sample_request_id = sr.id
+        """
+        clauses: list[str] = []
+        args: list[Any] = []
+        if status:
+            clauses.append("sr.status=?")
+            args.append(status)
+        if search:
+            kw = f"%{search.strip()}%"
+            clauses.append("(sr.id LIKE ? OR c.name LIKE ? OR f.name LIKE ? OR sr.note LIKE ?)")
+            args.extend([kw, kw, kw, kw])
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " GROUP BY sr.id ORDER BY sr.updated_at DESC"
+
+        with self._connect() as conn:
+            rows = conn.execute(query, tuple(args)).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_sample_request_items(self, sample_request_id: str) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    id,
+                    sample_request_id,
+                    category_name,
+                    quantity,
+                    status,
+                    tracking_no,
+                    note
+                FROM sample_request_items
+                WHERE sample_request_id=?
+                ORDER BY created_at ASC
+                """,
+                (sample_request_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def update_sample_request(
+        self,
+        sample_id: str,
+        status: str | None = None,
+        feedback: str | None = None,
+        decision: str | None = None,
+        note: str | None = None,
+    ) -> dict[str, Any] | None:
+        current = self.get_sample_request(sample_id)
+        if current is None:
+            return None
+
+        next_status = status if status is not None else current["status"]
+        next_feedback = feedback if feedback is not None else current["feedback"]
+        next_decision = decision if decision is not None else current["decision"]
+        next_note = note if note is not None else current["note"]
+
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE sample_requests
+                SET status=?, feedback=?, decision=?, note=?, updated_at=?
+                WHERE id=?
+                """,
+                (next_status, next_feedback, next_decision, next_note, utc_now_iso(), sample_id),
+            )
+        return self.get_sample_request(sample_id)
+
+    def update_sample_request_item(
+        self,
+        item_id: str,
+        status: str | None = None,
+        tracking_no: str | None = None,
+        note: str | None = None,
+    ) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            current = conn.execute(
+                "SELECT * FROM sample_request_items WHERE id=?",
+                (item_id,),
+            ).fetchone()
+            if current is None:
+                return None
+
+            next_status = status if status is not None else current["status"]
+            next_tracking = tracking_no if tracking_no is not None else current["tracking_no"]
+            next_note = note if note is not None else current["note"]
+
+            conn.execute(
+                """
+                UPDATE sample_request_items
+                SET status=?, tracking_no=?, note=?, updated_at=?
+                WHERE id=?
+                """,
+                (next_status, next_tracking, next_note, utc_now_iso(), item_id),
+            )
+
+            updated = conn.execute(
+                """
+                SELECT
+                    id,
+                    sample_request_id,
+                    category_name,
+                    quantity,
+                    status,
+                    tracking_no,
+                    note
+                FROM sample_request_items
+                WHERE id=?
+                """,
+                (item_id,),
+            ).fetchone()
+
+        return dict(updated) if updated else None
+
+    def generate_sample_order_suggestions(self, sample_id: str) -> dict[str, Any] | None:
+        sample = self.get_sample_request(sample_id)
+        if sample is None:
+            return None
+        items = self.list_sample_request_items(sample_id)
+
+        suggestions: list[dict[str, Any]] = []
+        for item in items:
+            suggested_qty = max(500, int(item["quantity"]) * 1000)
+            suggestions.append(
+                {
+                    "sample_item_id": item["id"],
+                    "category_name": item["category_name"],
+                    "suggested_product_name": str(item["category_name"]),
+                    "suggested_quantity": suggested_qty,
+                    "suggested_status": "待确认",
+                    "reason": (
+                        "Sample flow reached customer feedback stage; "
+                        "this draft quantity is a conservative commercial starting point."
+                    ),
+                }
+            )
+
+        return {
+            "sample_request_id": sample_id,
+            "decision": sample["decision"],
+            "suggestions": suggestions,
+        }
+
+    def convert_sample_to_order_drafts(self, sample_id: str) -> dict[str, Any] | None:
+        sample = self.get_sample_request(sample_id)
+        if sample is None:
+            return None
+
+        suggestions_payload = self.generate_sample_order_suggestions(sample_id)
+        if suggestions_payload is None:
+            return None
+
+        created_order_ids: list[str] = []
+        existing_order_ids: list[str] = []
+
+        for suggestion in suggestions_payload["suggestions"]:
+            sample_item_id = str(suggestion["sample_item_id"])
+            with self._connect() as conn:
+                existing = conn.execute(
+                    """
+                    SELECT order_id FROM sample_order_links
+                    WHERE sample_request_id=? AND sample_item_id=?
+                    """,
+                    (sample_id, sample_item_id),
+                ).fetchone()
+
+            if existing is not None:
+                existing_order_ids.append(str(existing["order_id"]))
+                continue
+
+            order = self.create_order(
+                customer_id=str(sample["customer_id"]),
+                product_name=str(suggestion["suggested_product_name"]),
+                quantity=int(suggestion["suggested_quantity"]),
+                unit_price=None,
+                currency="USD",
+                status="待确认",
+                payload={
+                    "source": "sample_request",
+                    "sample_request_id": sample_id,
+                    "sample_item_id": sample_item_id,
+                    "factory_id": sample["factory_id"],
+                },
+            )
+            created_order_ids.append(str(order["id"]))
+
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO sample_order_links (
+                        id, sample_request_id, sample_item_id, order_id, created_at
+                    ) VALUES (?,?,?,?,?)
+                    """,
+                    (
+                        f"sol_{uuid.uuid4().hex[:10]}",
+                        sample_id,
+                        sample_item_id,
+                        str(order["id"]),
+                        utc_now_iso(),
+                    ),
+                )
+
+        status = "converted_to_order" if created_order_ids or existing_order_ids else sample["status"]
+        decision = "order" if created_order_ids or existing_order_ids else sample["decision"]
+        self.update_sample_request(
+            sample_id=sample_id,
+            status=status,
+            decision=decision,
+        )
+
+        return {
+            "sample_request_id": sample_id,
+            "created_order_ids": created_order_ids,
+            "existing_order_ids": existing_order_ids,
         }
 
     def upsert_production_schedule(

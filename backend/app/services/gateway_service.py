@@ -1,6 +1,7 @@
 import asyncio
 import json
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -21,6 +22,61 @@ class RunState:
     events: list[RunEvent]
 
 
+class RoutedAgent:
+    name = "base_agent"
+
+    async def handle(self, service: "GatewayService", run_id: str, payload: MessageIn) -> str:
+        raise NotImplementedError
+
+
+class TradeAssistantAgent(RoutedAgent):
+    name = "trade_assistant_agent"
+
+    async def handle(self, service: "GatewayService", run_id: str, payload: MessageIn) -> str:
+        service._emit_tool(
+            run_id,
+            tool_name="intent_classifier",
+            content="Classified request into general trade-assistant workflow.",
+        )
+        await asyncio.sleep(0.2)
+        return await service._generate_assistant_reply(payload)
+
+
+class EmailOpsAgent(RoutedAgent):
+    name = "email_ops_agent"
+
+    async def handle(self, service: "GatewayService", run_id: str, payload: MessageIn) -> str:
+        service._emit_tool(
+            run_id,
+            tool_name="inbox_triage_agent",
+            content="Email-specific agent started triage and fetch flow.",
+        )
+        await asyncio.sleep(0.2)
+        email_context = await service._fetch_email_context(run_id)
+        return await service._generate_assistant_reply(payload, email_context=email_context)
+
+
+class GatewayAgentRegistry:
+    def __init__(self) -> None:
+        self._agents: dict[str, RoutedAgent] = {}
+
+    def register(self, agent: RoutedAgent) -> None:
+        self._agents[agent.name] = agent
+
+    def get(self, name: str) -> RoutedAgent | None:
+        return self._agents.get(name)
+
+    def list_names(self) -> list[str]:
+        return sorted(self._agents.keys())
+
+
+class GatewayAgentRouter:
+    def route(self, payload: MessageIn, should_trigger_email_fetch: Callable[[str], bool]) -> str:
+        if should_trigger_email_fetch(payload.text):
+            return EmailOpsAgent.name
+        return TradeAssistantAgent.name
+
+
 class GatewayService:
     """
     OpenClaw-inspired local gateway core.
@@ -32,6 +88,10 @@ class GatewayService:
     def __init__(self) -> None:
         self._runs: dict[str, RunState] = {}
         self._session_locks: dict[str, asyncio.Lock] = {}
+        self._agent_registry = GatewayAgentRegistry()
+        self._agent_router = GatewayAgentRouter()
+        self._agent_registry.register(TradeAssistantAgent())
+        self._agent_registry.register(EmailOpsAgent())
 
     def _lock_for_session(self, session_key: str) -> asyncio.Lock:
         if session_key not in self._session_locks:
@@ -64,6 +124,17 @@ class GatewayService:
     def _emit(self, run_id: str, event: RunEvent) -> None:
         state = self._runs[run_id]
         state.events.append(event)
+
+    def _emit_tool(self, run_id: str, tool_name: str, content: str) -> None:
+        self._emit(
+            run_id,
+            RunEvent(
+                run_id=run_id,
+                stream="tool",
+                tool_name=tool_name,
+                content=content,
+            ),
+        )
 
     @staticmethod
     def _should_trigger_email_fetch(text: str) -> bool:
@@ -165,11 +236,35 @@ class GatewayService:
 
         return await self._call_third_party_llm(payload.text, email_context=email_context)
 
+    async def _fetch_email_context(self, run_id: str) -> str | None:
+        try:
+            unread = await email_tool_adapter.check(limit=5, unseen=True)
+            unread_count = len(unread) if isinstance(unread, list) else 0
+            email_context = self._build_email_snapshot(unread if isinstance(unread, list) else [])
+            self._emit_tool(
+                run_id,
+                tool_name="email_fetcher",
+                content=(
+                    f"Fetched unread emails: {unread_count}. "
+                    "Snapshot attached to assistant context."
+                ),
+            )
+            return email_context
+        except EmailToolError as exc:
+            self._emit_tool(
+                run_id,
+                tool_name="email_fetcher",
+                content=f"Email fetch skipped: {exc}",
+            )
+            return None
+
+    def get_available_agents(self) -> list[str]:
+        return self._agent_registry.list_names()
+
     async def _run_agent_loop(self, run_id: str, payload: MessageIn) -> None:
         state = self._runs[run_id]
         state.info.status = "running"
         lock = self._lock_for_session(payload.session_key)
-        email_context: str | None = None
 
         try:
             async with lock:
@@ -185,78 +280,41 @@ class GatewayService:
                 )
                 await asyncio.sleep(0.25)
 
-                self._emit(
+                routed_name = self._agent_router.route(
+                    payload,
+                    should_trigger_email_fetch=self._should_trigger_email_fetch,
+                )
+                state.info.routed_agent = routed_name
+                self._emit_tool(
                     run_id,
-                    RunEvent(
-                        run_id=run_id,
-                        stream="tool",
-                        tool_name="intent_classifier",
-                        content="Classified request into trade-assistant workflow.",
-                    ),
+                    tool_name="supervisor_router",
+                    content=f"Supervisor routed run to {routed_name}.",
                 )
                 await asyncio.sleep(0.25)
 
-                if self._should_trigger_email_fetch(payload.text):
-                    try:
-                        unread = await email_tool_adapter.check(limit=5, unseen=True)
-                        unread_count = len(unread) if isinstance(unread, list) else 0
-                        email_context = self._build_email_snapshot(unread if isinstance(unread, list) else [])
-                        self._emit(
-                            run_id,
-                            RunEvent(
-                                run_id=run_id,
-                                stream="tool",
-                                tool_name="email_fetcher",
-                                content=(
-                                    f"Fetched unread emails: {unread_count}. "
-                                    "Snapshot attached to assistant context."
-                                ),
-                            ),
-                        )
-                    except EmailToolError as exc:
-                        self._emit(
-                            run_id,
-                            RunEvent(
-                                run_id=run_id,
-                                stream="tool",
-                                tool_name="email_fetcher",
-                                content=f"Email fetch skipped: {exc}",
-                            ),
-                        )
-                    await asyncio.sleep(0.2)
+                agent = self._agent_registry.get(routed_name) or self._agent_registry.get(
+                    TradeAssistantAgent.name
+                )
+                if agent is None:
+                    raise RuntimeError("No runnable agent registered for gateway")
 
-                self._emit(
+                self._emit_tool(
                     run_id,
-                    RunEvent(
-                        run_id=run_id,
-                        stream="tool",
-                        tool_name="llm_provider",
-                        content=(
-                            "Using provider="
-                            f"{llm_provider_config.provider}, "
-                            f"base_url={llm_provider_config.base_url or 'N/A'}, "
-                            f"model={llm_provider_config.model_name or 'N/A'}, "
-                            f"api_key={self._masked_key(llm_provider_config.api_key)}"
-                        ),
+                    tool_name="llm_provider",
+                    content=(
+                        "Using provider="
+                        f"{llm_provider_config.provider}, "
+                        f"base_url={llm_provider_config.base_url or 'N/A'}, "
+                        f"model={llm_provider_config.model_name or 'N/A'}, "
+                        f"api_key={self._masked_key(llm_provider_config.api_key)}"
                     ),
                 )
                 await asyncio.sleep(0.2)
 
-                self._emit(
-                    run_id,
-                    RunEvent(
-                        run_id=run_id,
-                        stream="tool",
-                        tool_name="timeline_writer",
-                        content="Timeline checkpoint appended.",
-                    ),
-                )
+                self._emit_tool(run_id, tool_name="timeline_writer", content="Timeline checkpoint appended.")
                 await asyncio.sleep(0.2)
 
-                summary = await self._generate_assistant_reply(
-                    payload,
-                    email_context=email_context,
-                )
+                summary = await agent.handle(service=self, run_id=run_id, payload=payload)
                 self._emit(
                     run_id,
                     RunEvent(run_id=run_id, stream="assistant", content=summary),

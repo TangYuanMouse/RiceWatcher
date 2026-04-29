@@ -1,5 +1,6 @@
 import json
 import re
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
@@ -24,9 +25,131 @@ def _extract_price(text: str) -> float | None:
     return float(match.group(1)) if match else None
 
 
+class InboxTriageAgent:
+    def __init__(
+        self,
+        llm_json_caller: Callable[[str, str], Awaitable[dict[str, Any] | None]],
+    ) -> None:
+        self._llm_json_caller = llm_json_caller
+
+    async def classify_email(self, email_data: dict[str, Any]) -> dict[str, Any]:
+        subject = str(email_data.get("subject", ""))
+        snippet = str(email_data.get("snippet", ""))
+        text = f"{subject}\n{snippet}".lower()
+
+        llm_result = await self._llm_json_caller(
+            system_prompt=(
+                "Classify trade emails. Output JSON only with keys: "
+                "intent, confidence, reasons."
+            ),
+            user_prompt=(
+                "Intents: new_inquiry, quotation_reply, order_confirmation, "
+                "payment_notice, logistics_docs, old_customer_followup, non_business_spam.\n"
+                f"Subject: {subject}\nSnippet: {snippet}"
+            ),
+        )
+        if llm_result and isinstance(llm_result, dict) and llm_result.get("intent"):
+            return {
+                "intent": str(llm_result.get("intent")),
+                "confidence": float(llm_result.get("confidence", 0.7)),
+                "reasons": llm_result.get("reasons", []),
+            }
+
+        if any(k in text for k in ["purchase order", "po", "pi confirmed", "order confirm"]):
+            return {"intent": "order_confirmation", "confidence": 0.88, "reasons": ["order keywords"]}
+        if any(k in text for k in ["payment", "deposit", "swift", "wire transfer"]):
+            return {"intent": "payment_notice", "confidence": 0.82, "reasons": ["payment keywords"]}
+        if any(k in text for k in ["bl", "bill of lading", "tracking", "shipment"]):
+            return {"intent": "logistics_docs", "confidence": 0.78, "reasons": ["logistics keywords"]}
+        if any(k in text for k in ["quote", "quotation", "price", "counter offer"]):
+            return {"intent": "quotation_reply", "confidence": 0.76, "reasons": ["quotation keywords"]}
+        if any(k in text for k in ["inquiry", "rfq", "looking for", "need supplier"]):
+            return {"intent": "new_inquiry", "confidence": 0.8, "reasons": ["inquiry keywords"]}
+        if any(k in text for k in ["unsubscribe", "newsletter", "promotion"]):
+            return {"intent": "non_business_spam", "confidence": 0.9, "reasons": ["spam keywords"]}
+        return {"intent": "old_customer_followup", "confidence": 0.6, "reasons": ["default"]}
+
+
+class EmailExtractionAgent:
+    def __init__(
+        self,
+        llm_json_caller: Callable[[str, str], Awaitable[dict[str, Any] | None]],
+    ) -> None:
+        self._llm_json_caller = llm_json_caller
+
+    async def extract_fields(self, email_data: dict[str, Any]) -> dict[str, Any]:
+        subject = str(email_data.get("subject", ""))
+        snippet = str(email_data.get("snippet", ""))
+        text = f"{subject} {snippet}"
+
+        llm_result = await self._llm_json_caller(
+            system_prompt=(
+                "Extract fields from trade email. Output JSON only with keys: "
+                "product_name, quantity, target_price, currency."
+            ),
+            user_prompt=f"Subject: {subject}\nSnippet: {snippet}",
+        )
+        if llm_result and isinstance(llm_result, dict):
+            product_name = str(llm_result.get("product_name") or "General Product")
+            quantity = int(llm_result.get("quantity") or 1000)
+            target_price = llm_result.get("target_price")
+            target_price = float(target_price) if target_price is not None else None
+            currency = str(llm_result.get("currency") or "USD")
+            return {
+                "product_name": product_name,
+                "quantity": quantity,
+                "target_price": target_price,
+                "currency": currency,
+                "confidence": float(llm_result.get("confidence", 0.74)),
+            }
+
+        return {
+            "product_name": "Rice Moisture Sensor",
+            "quantity": _extract_quantity(text),
+            "target_price": _extract_price(text),
+            "currency": "USD",
+            "confidence": 0.62,
+        }
+
+
+class EmailActionPlannerAgent:
+    def plan_actions(self, intent: str, fields: dict[str, Any]) -> list[dict[str, Any]]:
+        actions: list[dict[str, Any]] = [{"type": "timeline_append", "reason": f"intent={intent}"}]
+        if intent == "new_inquiry":
+            actions.extend(
+                [
+                    {"type": "update_customer_stage", "stage": "inquiry"},
+                    {"type": "draft_reply_email"},
+                ]
+            )
+        elif intent == "quotation_reply":
+            actions.append({"type": "update_customer_stage", "stage": "negotiation"})
+        elif intent == "order_confirmation":
+            actions.append(
+                {
+                    "type": "create_order",
+                    "product_name": fields["product_name"],
+                    "quantity": fields["quantity"],
+                    "unit_price": fields["target_price"],
+                    "currency": fields["currency"],
+                    "status": "待确认",
+                }
+            )
+        elif intent == "payment_notice":
+            actions.append({"type": "update_latest_order_status", "status": "生产中"})
+        elif intent == "logistics_docs":
+            actions.append({"type": "update_latest_order_status", "status": "已发货"})
+        return actions
+
+
 class EmailOrchestrationService:
     classification_threshold = settings.email_classification_confidence_threshold
     extraction_threshold = settings.email_extraction_confidence_threshold
+
+    def __init__(self) -> None:
+        self._triage_agent = InboxTriageAgent(self._call_llm_json)
+        self._extraction_agent = EmailExtractionAgent(self._call_llm_json)
+        self._action_planner_agent = EmailActionPlannerAgent()
 
     async def _call_llm_json(self, system_prompt: str, user_prompt: str) -> dict[str, Any] | None:
         ready = (
@@ -77,103 +200,13 @@ class EmailOrchestrationService:
             return None
 
     async def classify_email(self, email_data: dict[str, Any]) -> dict[str, Any]:
-        subject = str(email_data.get("subject", ""))
-        snippet = str(email_data.get("snippet", ""))
-        text = f"{subject}\n{snippet}".lower()
-
-        llm_result = await self._call_llm_json(
-            system_prompt=(
-                "Classify trade emails. Output JSON only with keys: "
-                "intent, confidence, reasons."
-            ),
-            user_prompt=(
-                "Intents: new_inquiry, quotation_reply, order_confirmation, "
-                "payment_notice, logistics_docs, old_customer_followup, non_business_spam.\n"
-                f"Subject: {subject}\nSnippet: {snippet}"
-            ),
-        )
-        if llm_result and isinstance(llm_result, dict) and llm_result.get("intent"):
-            return {
-                "intent": str(llm_result.get("intent")),
-                "confidence": float(llm_result.get("confidence", 0.7)),
-                "reasons": llm_result.get("reasons", []),
-            }
-
-        if any(k in text for k in ["purchase order", "po", "pi confirmed", "order confirm"]):
-            return {"intent": "order_confirmation", "confidence": 0.88, "reasons": ["order keywords"]}
-        if any(k in text for k in ["payment", "deposit", "swift", "wire transfer"]):
-            return {"intent": "payment_notice", "confidence": 0.82, "reasons": ["payment keywords"]}
-        if any(k in text for k in ["bl", "bill of lading", "tracking", "shipment"]):
-            return {"intent": "logistics_docs", "confidence": 0.78, "reasons": ["logistics keywords"]}
-        if any(k in text for k in ["quote", "quotation", "price", "counter offer"]):
-            return {"intent": "quotation_reply", "confidence": 0.76, "reasons": ["quotation keywords"]}
-        if any(k in text for k in ["inquiry", "rfq", "looking for", "need supplier"]):
-            return {"intent": "new_inquiry", "confidence": 0.8, "reasons": ["inquiry keywords"]}
-        if any(k in text for k in ["unsubscribe", "newsletter", "promotion"]):
-            return {"intent": "non_business_spam", "confidence": 0.9, "reasons": ["spam keywords"]}
-        return {"intent": "old_customer_followup", "confidence": 0.6, "reasons": ["default"]}
+        return await self._triage_agent.classify_email(email_data)
 
     async def extract_fields(self, email_data: dict[str, Any]) -> dict[str, Any]:
-        subject = str(email_data.get("subject", ""))
-        snippet = str(email_data.get("snippet", ""))
-        text = f"{subject} {snippet}"
-
-        llm_result = await self._call_llm_json(
-            system_prompt=(
-                "Extract fields from trade email. Output JSON only with keys: "
-                "product_name, quantity, target_price, currency."
-            ),
-            user_prompt=f"Subject: {subject}\nSnippet: {snippet}",
-        )
-        if llm_result and isinstance(llm_result, dict):
-            product_name = str(llm_result.get("product_name") or "General Product")
-            quantity = int(llm_result.get("quantity") or 1000)
-            target_price = llm_result.get("target_price")
-            target_price = float(target_price) if target_price is not None else None
-            currency = str(llm_result.get("currency") or "USD")
-            return {
-                "product_name": product_name,
-                "quantity": quantity,
-                "target_price": target_price,
-                "currency": currency,
-                "confidence": float(llm_result.get("confidence", 0.74)),
-            }
-
-        return {
-            "product_name": "Rice Moisture Sensor",
-            "quantity": _extract_quantity(text),
-            "target_price": _extract_price(text),
-            "currency": "USD",
-            "confidence": 0.62,
-        }
+        return await self._extraction_agent.extract_fields(email_data)
 
     def plan_actions(self, intent: str, fields: dict[str, Any]) -> list[dict[str, Any]]:
-        actions: list[dict[str, Any]] = [{"type": "timeline_append", "reason": f"intent={intent}"}]
-        if intent == "new_inquiry":
-            actions.extend(
-                [
-                    {"type": "update_customer_stage", "stage": "inquiry"},
-                    {"type": "draft_reply_email"},
-                ]
-            )
-        elif intent == "quotation_reply":
-            actions.append({"type": "update_customer_stage", "stage": "negotiation"})
-        elif intent == "order_confirmation":
-            actions.append(
-                {
-                    "type": "create_order",
-                    "product_name": fields["product_name"],
-                    "quantity": fields["quantity"],
-                    "unit_price": fields["target_price"],
-                    "currency": fields["currency"],
-                    "status": "待确认",
-                }
-            )
-        elif intent == "payment_notice":
-            actions.append({"type": "update_latest_order_status", "status": "生产中"})
-        elif intent == "logistics_docs":
-            actions.append({"type": "update_latest_order_status", "status": "已发货"})
-        return actions
+        return self._action_planner_agent.plan_actions(intent, fields)
 
     async def process_unread(self, mailbox: str = "INBOX", limit: int = 10) -> EmailProcessReport:
         report = EmailProcessReport(

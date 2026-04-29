@@ -41,6 +41,7 @@ class RunInfo(BaseModel):
     status: RunStatus
     created_at: str
     ended_at: str | None = None
+    routed_agent: str | None = None
 
 
 class Customer(BaseModel):
@@ -230,3 +231,162 @@ class ProductionRescheduleRequest(BaseModel):
 class ProductionRescheduleResponse(BaseModel):
     updated: ProductionScheduleItem
     conflicts: list[dict[str, object]]
+
+
+FulfillmentStatus = Literal["planned", "in_progress", "done", "delayed", "blocked"]
+
+
+class FactoryRecord(BaseModel):
+    id: str
+    name: str
+    country: str
+    contact_person: str | None = None
+    contact_email: str | None = None
+    tags: list[str] = []
+
+
+class FulfillmentTaskItem(BaseModel):
+    id: str
+    order_id: str
+    customer_id: str
+    customer_name: str
+    product_name: str
+    quantity: int
+    order_status: str
+    factory_id: str
+    factory_name: str
+    status: FulfillmentStatus
+    planned_start: str
+    planned_end: str
+    actual_end: str | None = None
+
+
+class FulfillmentMilestoneItem(BaseModel):
+    id: str
+    task_id: str
+    milestone_name: str
+    sequence: int
+    status: FulfillmentStatus
+    planned_date: str
+    actual_date: str | None = None
+    responsible_party: str | None = None
+    note: str | None = None
+    proof_url: str | None = None
+
+
+class FulfillmentMilestoneUpdateRequest(BaseModel):
+    status: FulfillmentStatus | None = None
+    planned_date: str | None = None
+    actual_date: str | None = None
+    responsible_party: str | None = None
+    note: str | None = None
+    proof_url: str | None = None
+
+
+class FulfillmentTaskAssignFactoryRequest(BaseModel):
+    factory_id: str
+
+
+class DelayRiskItem(BaseModel):
+    milestone_id: str
+    task_id: str
+    order_id: str
+    customer_name: str
+    factory_name: str
+    milestone_name: str
+    planned_date: str
+    status: FulfillmentStatus
+    overdue_days: int
+    risk_level: Literal["low", "medium", "high"]
+    reminder: str
+
+
+class DelayRiskReport(BaseModel):
+    scanned: int
+    at_risk: int
+    auto_marked: int
+    items: list[DelayRiskItem]
+
+
+SampleRequestStatus = Literal[
+    "requested",
+    "making",
+    "shipped",
+    "received",
+    "feedback_received",
+    "converted_to_order",
+    "closed_no_order",
+]
+SampleItemStatus = Literal["requested", "making", "shipped", "received"]
+SampleDecision = Literal["pending", "order", "no_order"]
+
+
+class SampleCategoryInput(BaseModel):
+    category_name: str
+    quantity: int = Field(default=1, ge=1, le=1000)
+
+
+class SampleRequestCreateRequest(BaseModel):
+    customer_id: str
+    factory_id: str
+    categories: list[SampleCategoryInput]
+    note: str | None = None
+
+
+class SampleRequestRecord(BaseModel):
+    id: str
+    customer_id: str
+    customer_name: str
+    factory_id: str
+    factory_name: str
+    status: SampleRequestStatus
+    feedback: str | None = None
+    decision: SampleDecision
+    note: str | None = None
+    created_at: str
+    updated_at: str
+    item_count: int
+
+
+class SampleRequestItem(BaseModel):
+    id: str
+    sample_request_id: str
+    category_name: str
+    quantity: int
+    status: SampleItemStatus
+    tracking_no: str | None = None
+    note: str | None = None
+
+
+class SampleRequestUpdateRequest(BaseModel):
+    status: SampleRequestStatus | None = None
+    feedback: str | None = None
+    decision: SampleDecision | None = None
+    note: str | None = None
+
+
+class SampleRequestItemUpdateRequest(BaseModel):
+    status: SampleItemStatus | None = None
+    tracking_no: str | None = None
+    note: str | None = None
+
+
+class SampleOrderSuggestionItem(BaseModel):
+    sample_item_id: str
+    category_name: str
+    suggested_product_name: str
+    suggested_quantity: int
+    suggested_status: Literal["待确认"] = "待确认"
+    reason: str
+
+
+class SampleOrderSuggestionResponse(BaseModel):
+    sample_request_id: str
+    decision: SampleDecision
+    suggestions: list[SampleOrderSuggestionItem]
+
+
+class SampleOrderConversionResponse(BaseModel):
+    sample_request_id: str
+    created_order_ids: list[str]
+    existing_order_ids: list[str]

@@ -111,3 +111,121 @@ export interface ProductionScheduleItem {
   status: string;
   progress: number;
 }
+
+export interface FactoryRecord {
+  id: string;
+  name: string;
+  country: string;
+  contact_person: string | null;
+  contact_email: string | null;
+  tags: string[];
+}
+
+export type FulfillmentStatus = "planned" | "in_progress" | "done" | "delayed" | "blocked";
+
+export interface FulfillmentTaskItem {
+  id: string;
+  order_id: string;
+  customer_id: string;
+  customer_name: string;
+  product_name: string;
+  quantity: number;
+  order_status: string;
+  factory_id: string;
+  factory_name: string;
+  status: FulfillmentStatus;
+  planned_start: string;
+  planned_end: string;
+  actual_end: string | null;
+}
+
+export interface FulfillmentMilestoneItem {
+  id: string;
+  task_id: string;
+  milestone_name: string;
+  sequence: number;
+  status: FulfillmentStatus;
+  planned_date: string;
+  actual_date: string | null;
+  responsible_party: string | null;
+  note: string | null;
+  proof_url: string | null;
+}
+
+export interface DelayRiskItem {
+  milestone_id: string;
+  task_id: string;
+  order_id: string;
+  customer_name: string;
+  factory_name: string;
+  milestone_name: string;
+  planned_date: string;
+  status: FulfillmentStatus;
+  overdue_days: number;
+  risk_level: "low" | "medium" | "high";
+  reminder: string;
+}
+
+export interface DelayRiskReport {
+  scanned: number;
+  at_risk: number;
+  auto_marked: number;
+  items: DelayRiskItem[];
+}
+
+export type SampleRequestStatus =
+  | "requested"
+  | "making"
+  | "shipped"
+  | "received"
+  | "feedback_received"
+  | "converted_to_order"
+  | "closed_no_order";
+export type SampleItemStatus = "requested" | "making" | "shipped" | "received";
+export type SampleDecision = "pending" | "order" | "no_order";
+
+export interface SampleRequestRecord {
+  id: string;
+  customer_id: string;
+  customer_name: string;
+  factory_id: string;
+  factory_name: string;
+  status: SampleRequestStatus;
+  feedback: string | null;
+  decision: SampleDecision;
+  note: string | null;
+  created_at: string;
+  updated_at: string;
+  item_count: number;
+}
+
+export interface SampleRequestItem {
+  id: string;
+  sample_request_id: string;
+  category_name: string;
+  quantity: number;
+  status: SampleItemStatus;
+  tracking_no: string | null;
+  note: string | null;
+}
+
+export interface SampleOrderSuggestionItem {
+  sample_item_id: string;
+  category_name: string;
+  suggested_product_name: string;
+  suggested_quantity: number;
+  suggested_status: "待确认";
+  reason: string;
+}
+
+export interface SampleOrderSuggestionResponse {
+  sample_request_id: string;
+  decision: SampleDecision;
+  suggestions: SampleOrderSuggestionItem[];
+}
+
+export interface SampleOrderConversionResponse {
+  sample_request_id: string;
+  created_order_ids: string[];
+  existing_order_ids: string[];
+}

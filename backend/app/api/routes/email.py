@@ -24,6 +24,18 @@ from app.services.persistence_service import persistence_service
 router = APIRouter()
 
 
+@router.get("/agents")
+def list_email_agents() -> dict[str, object]:
+    return {
+        "orchestrator": "email_orchestration_service",
+        "agents": [
+            "inbox_triage_agent",
+            "email_extraction_agent",
+            "email_action_planner_agent",
+        ],
+    }
+
+
 @router.get("/status")
 def get_email_skill_status() -> dict[str, object]:
     return email_tool_adapter.status()

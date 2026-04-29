@@ -5,6 +5,7 @@ OpenClaw-style foreign-trade AI assistant skeleton.
 ## What is included
 
 - Gateway-first backend with per-session serialized execution lanes.
+- Multi-agent supervisor routing (gateway supervisor + domain agents).
 - Streaming run events via Server-Sent Events.
 - Customer list and timeline APIs.
 - React dashboard with run console + timeline view.
@@ -13,11 +14,16 @@ OpenClaw-style foreign-trade AI assistant skeleton.
 - SQLite persistence for customers, timeline, orders, and email processing records.
 - Email orchestration pipeline (classify -> extract -> action plan -> write timeline/order).
 - Built-in scheduler with retry/backoff for unread email processing.
+- Built-in scheduler for unread email processing and fulfillment delay-risk scanning.
 - Context-aware reply draft generation using customer + order + email context.
 - Reply draft approval flow (edit -> submit -> approve/reject -> send).
 - Confidence-threshold-based manual review queue for low-confidence emails.
 - Production scheduling planner and visualization-ready API.
 - Drag-reschedule API with production line conflict detection.
+- Factory fulfillment tracking for trader-to-factory order execution milestones.
+- Manual factory milestone editing with searchable fulfillment board.
+- Sample shipment workflow from inquiry to feedback to order/no-order decision.
+- Auto-generated order draft suggestions from sample feedback, with one-click conversion.
 
 ## Project structure
 
@@ -100,7 +106,9 @@ Open:
 - GET /api/v1/gateway/runs/{run_id}
 - GET /api/v1/gateway/runs/{run_id}/events/stream
 - GET /api/v1/gateway/config/llm
+- GET /api/v1/gateway/agents
 - GET /api/v1/email/status
+- GET /api/v1/email/agents
 - POST /api/v1/email/check
 - POST /api/v1/email/fetch
 - POST /api/v1/email/search
@@ -122,6 +130,19 @@ Open:
 - GET /api/v1/production/schedule
 - POST /api/v1/production/plan
 - PATCH /api/v1/production/schedule/{schedule_id}/reschedule
+- GET /api/v1/production/factories
+- GET /api/v1/production/tasks
+- GET /api/v1/production/tasks/{task_id}/milestones
+- PATCH /api/v1/production/tasks/{task_id}/assign-factory
+- PATCH /api/v1/production/milestones/{milestone_id}
+- POST /api/v1/production/delay-risks/scan
+- GET /api/v1/production/samples
+- POST /api/v1/production/samples
+- GET /api/v1/production/samples/{sample_id}/items
+- PATCH /api/v1/production/samples/{sample_id}
+- PATCH /api/v1/production/sample-items/{item_id}
+- GET /api/v1/production/samples/{sample_id}/order-suggestions
+- POST /api/v1/production/samples/{sample_id}/convert-to-orders
 - GET /api/v1/automation/jobs
 - POST /api/v1/automation/jobs/{job_id}/run-now
 - POST /api/v1/automation/jobs/{job_id}/enable

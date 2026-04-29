@@ -1,10 +1,22 @@
 import type {
   Customer,
+  DelayRiskReport,
+  FactoryRecord,
+  FulfillmentMilestoneItem,
+  FulfillmentStatus,
+  FulfillmentTaskItem,
   OrderRecord,
   ProductionRescheduleResponse,
   ProductionScheduleItem,
   ReplyDraftRecord,
   ReplyDraftResponse,
+  SampleDecision,
+  SampleItemStatus,
+  SampleOrderConversionResponse,
+  SampleOrderSuggestionResponse,
+  SampleRequestItem,
+  SampleRequestRecord,
+  SampleRequestStatus,
   ReviewQueueItem,
   RunAccepted,
   TimelineEvent,
@@ -217,6 +229,175 @@ export async function rescheduleProductionItem(
   });
   if (!resp.ok) {
     throw new Error(`Failed to reschedule production item: ${resp.status}`);
+  }
+  return resp.json();
+}
+
+export async function fetchFactories(): Promise<FactoryRecord[]> {
+  const resp = await fetch(`${API_BASE}/production/factories`);
+  if (!resp.ok) {
+    throw new Error(`Failed to load factories: ${resp.status}`);
+  }
+  return resp.json();
+}
+
+export async function fetchFulfillmentTasks(status?: string, search?: string): Promise<FulfillmentTaskItem[]> {
+  const params = new URLSearchParams();
+  if (status) params.set("status", status);
+  if (search) params.set("search", search);
+  const query = params.toString() ? `?${params.toString()}` : "";
+  const resp = await fetch(`${API_BASE}/production/tasks${query}`);
+  if (!resp.ok) {
+    throw new Error(`Failed to load fulfillment tasks: ${resp.status}`);
+  }
+  return resp.json();
+}
+
+export async function fetchTaskMilestones(taskId: string): Promise<FulfillmentMilestoneItem[]> {
+  const resp = await fetch(`${API_BASE}/production/tasks/${taskId}/milestones`);
+  if (!resp.ok) {
+    throw new Error(`Failed to load milestones: ${resp.status}`);
+  }
+  return resp.json();
+}
+
+export async function assignFactoryToTask(
+  taskId: string,
+  factoryId: string
+): Promise<FulfillmentTaskItem> {
+  const resp = await fetch(`${API_BASE}/production/tasks/${taskId}/assign-factory`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ factory_id: factoryId }),
+  });
+  if (!resp.ok) {
+    throw new Error(`Failed to assign factory: ${resp.status}`);
+  }
+  return resp.json();
+}
+
+export async function updateMilestone(
+  milestoneId: string,
+  payload: {
+    status?: FulfillmentStatus;
+    planned_date?: string;
+    actual_date?: string;
+    responsible_party?: string;
+    note?: string;
+    proof_url?: string;
+  }
+): Promise<FulfillmentMilestoneItem> {
+  const resp = await fetch(`${API_BASE}/production/milestones/${milestoneId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!resp.ok) {
+    throw new Error(`Failed to update milestone: ${resp.status}`);
+  }
+  return resp.json();
+}
+
+export async function scanDelayRisks(autoMark = true): Promise<DelayRiskReport> {
+  const resp = await fetch(`${API_BASE}/production/delay-risks/scan?auto_mark=${String(autoMark)}`, {
+    method: "POST",
+  });
+  if (!resp.ok) {
+    throw new Error(`Failed to scan delay risks: ${resp.status}`);
+  }
+  return resp.json();
+}
+
+export async function fetchSampleRequests(status?: string, search?: string): Promise<SampleRequestRecord[]> {
+  const params = new URLSearchParams();
+  if (status) params.set("status", status);
+  if (search) params.set("search", search);
+  const query = params.toString() ? `?${params.toString()}` : "";
+  const resp = await fetch(`${API_BASE}/production/samples${query}`);
+  if (!resp.ok) {
+    throw new Error(`Failed to load sample requests: ${resp.status}`);
+  }
+  return resp.json();
+}
+
+export async function createSampleRequest(payload: {
+  customer_id: string;
+  factory_id: string;
+  categories: Array<{ category_name: string; quantity: number }>;
+  note?: string;
+}): Promise<SampleRequestRecord> {
+  const resp = await fetch(`${API_BASE}/production/samples`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!resp.ok) {
+    throw new Error(`Failed to create sample request: ${resp.status}`);
+  }
+  return resp.json();
+}
+
+export async function fetchSampleItems(sampleId: string): Promise<SampleRequestItem[]> {
+  const resp = await fetch(`${API_BASE}/production/samples/${sampleId}/items`);
+  if (!resp.ok) {
+    throw new Error(`Failed to load sample items: ${resp.status}`);
+  }
+  return resp.json();
+}
+
+export async function updateSampleRequest(
+  sampleId: string,
+  payload: {
+    status?: SampleRequestStatus;
+    feedback?: string;
+    decision?: SampleDecision;
+    note?: string;
+  }
+): Promise<SampleRequestRecord> {
+  const resp = await fetch(`${API_BASE}/production/samples/${sampleId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!resp.ok) {
+    throw new Error(`Failed to update sample request: ${resp.status}`);
+  }
+  return resp.json();
+}
+
+export async function updateSampleItem(
+  itemId: string,
+  payload: {
+    status?: SampleItemStatus;
+    tracking_no?: string;
+    note?: string;
+  }
+): Promise<SampleRequestItem> {
+  const resp = await fetch(`${API_BASE}/production/sample-items/${itemId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!resp.ok) {
+    throw new Error(`Failed to update sample item: ${resp.status}`);
+  }
+  return resp.json();
+}
+
+export async function fetchSampleOrderSuggestions(sampleId: string): Promise<SampleOrderSuggestionResponse> {
+  const resp = await fetch(`${API_BASE}/production/samples/${sampleId}/order-suggestions`);
+  if (!resp.ok) {
+    throw new Error(`Failed to load sample order suggestions: ${resp.status}`);
+  }
+  return resp.json();
+}
+
+export async function convertSampleToOrders(sampleId: string): Promise<SampleOrderConversionResponse> {
+  const resp = await fetch(`${API_BASE}/production/samples/${sampleId}/convert-to-orders`, {
+    method: "POST",
+  });
+  if (!resp.ok) {
+    throw new Error(`Failed to convert sample to draft orders: ${resp.status}`);
   }
   return resp.json();
 }

@@ -3,6 +3,7 @@ import json
 from typing import Any
 
 from app.core.config import settings
+from app.services.delay_risk_service import delay_risk_service
 from app.services.email_orchestration_service import email_orchestration_service
 from app.services.persistence_service import persistence_service
 
@@ -53,6 +54,8 @@ class SchedulerService:
                     mailbox=str(payload.get("mailbox", "INBOX")),
                     limit=int(payload.get("limit", 10)),
                 )
+            elif job.get("job_type") == "scan_delay_risks":
+                delay_risk_service.scan_and_mark(auto_mark=bool(payload.get("auto_mark", True)))
             else:
                 raise RuntimeError(f"Unsupported job_type: {job.get('job_type')}")
 

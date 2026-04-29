@@ -46,3 +46,11 @@ def get_llm_config_status() -> dict[str, object]:
             and llm_provider_config.model_name
         ),
     }
+
+
+@router.get("/agents")
+def list_gateway_agents() -> dict[str, object]:
+    return {
+        "supervisor": "gateway_supervisor_router",
+        "agents": gateway_service.get_available_agents(),
+    }
