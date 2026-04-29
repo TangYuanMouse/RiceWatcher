@@ -15,3 +15,6 @@ imap-smtp-email/.env
 
 # Local data
 backend/data/
+
+# Private requirement note
+面向外贸的AIAgent的需求文档.txt
